@@ -5,8 +5,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantLock;
 
 import org.apache.log4j.Logger;
 
@@ -30,12 +28,14 @@ public class IBClient implements EWrapper {
     protected static OrderManager m_orderManager = null;
     protected static Trader m_trader = null;
     protected static PositionMonitor m_positionMonitor = null;
-    protected static CancelHandler m_canceller = null;
-    protected static NewOrderHandler m_newOrderHandler = null;
+    protected static CancelHandler m_cancelHandler = null;
+    protected static OrderHandler m_orderHandler = null;
     
     protected EReaderSignal readerSignal;
     protected EClientSocket _clientSocket = null;
     protected int currentOrderId = -1;
+    
+    private List firstOpenOrderExecRecord = null;
     
     private IBClient() {
         if(readerSignal == null){
@@ -50,8 +50,9 @@ public class IBClient implements EWrapper {
         m_orderManager = new OrderManager(this);
         m_trader = new Trader(this);
         m_positionMonitor = new PositionMonitor(this);
-        m_canceller = new CancelHandler(this);
-        m_newOrderHandler = new NewOrderHandler(this);
+        m_cancelHandler = new CancelHandler(this);
+        m_orderHandler = new OrderHandler(this);
+        firstOpenOrderExecRecord = new CopyOnWriteArrayList<Integer>();
     }
     //! [socket_init]
     public static IBClient getInstance() {
@@ -67,6 +68,10 @@ public class IBClient implements EWrapper {
     
     public EReaderSignal getSignal() {
         return readerSignal;
+    }
+    
+    public List getFirstOpenOrderExecRecord(){
+        return firstOpenOrderExecRecord;
     }
     
     public int getCurrentOrderId(){
@@ -100,11 +105,11 @@ public class IBClient implements EWrapper {
     }
     
     public CancelHandler getCancelHandler(){
-        return m_canceller;
+        return m_cancelHandler;
     }
     
-    public NewOrderHandler getNewOrderHandler(){
-        return m_newOrderHandler;
+    public OrderHandler getOrderHandler(){
+        return m_orderHandler;
     }
     
     // Test start
@@ -189,10 +194,20 @@ public class IBClient implements EWrapper {
                 ", ClientId: "+clientId+", WhyHeld: "+whyHeld+", MktCapPrice: "+mktCapPrice);
         
         if(status.equalsIgnoreCase("Cancelled")){
-            synchronized(OrderManager.CANCELORDERLOCK){
-                OrderManager.CANCELORDERLOCK.notifyAll();
-                LOG.debug("Received order cancel status, notifying Order Manager.");
+            LOG.debug("Removing orderId = " + orderId + " from map and pending. Notifying cancel handler");
+            synchronized(Trader.ORDERCANCELMONITORLOCKFORWRAPPER){
+                m_cancelHandler.removeOrderFromPendingCancelList(orderId);
+                m_orderManager.removeOrderFromMap(orderId);
+                
+                Trader.ORDERCANCELMONITORLOCKFORWRAPPER.notifyAll();
+                LOG.debug("Received order cancel status, notifying Cancel Handler.");
             }
+        } else if (status.equalsIgnoreCase("Filled")){
+            LOG.debug("Removing orderId = " + orderId + "from map and pending. Triggerring order monitor");
+            m_cancelHandler.removeOrderFromPendingCancelList(orderId);
+            m_orderManager.removeOrderFromMap(orderId);
+            
+            m_orderManager.triggerOrderMonitor();
         } else {
             m_orderManager.updateOrderStatus(orderId, filled, remaining);
         }
@@ -211,6 +226,13 @@ public class IBClient implements EWrapper {
                 order.action()+", "+order.orderType()+" "+order.totalQuantity()+", "+orderState.status());
         if(contract.conid() == Integer.parseInt(ConfigReader.getInstance().getConfig(Configs.TRADE_CONID))){
             // Only takes order info for the TRADE CONID
+            if(!firstOpenOrderExecRecord.contains((Integer) orderId)){
+                synchronized(Trader.FIRSTOPENORDERRECOREXECDLOCK){
+                    firstOpenOrderExecRecord.add((Integer) orderId);
+                    Trader.FIRSTOPENORDERRECOREXECDLOCK.notifyAll();
+                }
+                LOG.debug("First open order/exec is received for orderId = " + orderId + ", notifying Order Handler");
+            }
             m_orderManager.updateOpenOrder(orderId, order);
         }
     }
@@ -222,8 +244,9 @@ public class IBClient implements EWrapper {
         //System.out.println("OpenOrderEnd");
         LOG.debug("OpenOrderEnd");
         
-        synchronized(Trader.OPENORDERLOCK){
-            Trader.OPENORDERLOCK.notifyAll();
+        synchronized(Trader.OPENORDERENDLOCK){
+            m_orderHandler.setOpenOrderEndReceived(true);
+            Trader.OPENORDERENDLOCK.notifyAll();
             LOG.debug("Received OpenOrderEnd, notifying Order Manager.");
         }
     }
@@ -297,8 +320,17 @@ public class IBClient implements EWrapper {
         LOG.debug("ExecDetails. "+reqId+" - ["+contract.symbol()+"], ["+contract.secType()+"], ["+contract.currency()+"], ["+execution.execId()+"], ["+execution.orderId()+"], ["+execution.shares()+"]");
         
         int orderId = execution.orderId();
-        m_orderManager.processExecDetails(orderId, execution.cumQty());
-        
+        if(contract.conid() == Integer.parseInt(ConfigReader.getInstance().getConfig(Configs.TRADE_CONID))){
+            // Only takes order info for the TRADE CONID
+            if(!firstOpenOrderExecRecord.contains((Integer) orderId)){
+                synchronized(Trader.FIRSTOPENORDERRECOREXECDLOCK){
+                    firstOpenOrderExecRecord.add((Integer) orderId);
+                    Trader.FIRSTOPENORDERRECOREXECDLOCK.notifyAll();
+                }
+                LOG.debug("First open order/exec is received for orderId = " + orderId + ", notifying Order Handler");
+            }
+            m_orderManager.processExecDetails(orderId, execution.cumQty());
+        }
     }
     //! [execdetails]
     
@@ -516,12 +548,13 @@ public class IBClient implements EWrapper {
         //System.out.println("Error. Id: " + id + ", Code: " + errorCode + ", Msg: " + errorMsg + "\n");
         LOG.error("Error. Id: " + id + ", Code: " + errorCode + ", Msg: " + errorMsg);
         
-        List pendingCancelList = (CopyOnWriteArrayList<Integer>) m_orderManager.getPendingCancelList();
-        if(errorCode == 202 && pendingCancelList.contains(id)){
-            synchronized(OrderManager.CANCELORDERLOCK){
-                OrderManager.CANCELORDERLOCK.notifyAll();
-                LOG.debug("Received order cancel status, notifying Order Manager.");
-            }
+        LOG.debug("Removing orderId = " + id + " from map and pending. Notifying cancel handler");
+        synchronized(Trader.ORDERCANCELMONITORLOCKFORWRAPPER){
+            m_cancelHandler.removeOrderFromPendingCancelList(id);
+            m_orderManager.removeOrderFromMap(id);
+            
+            Trader.ORDERCANCELMONITORLOCKFORWRAPPER.notifyAll();
+            LOG.debug("Received order cancel status, notifying Cancel Handler.");
         }
     }
     //! [error]

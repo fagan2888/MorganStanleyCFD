@@ -22,8 +22,9 @@ public class Trader {
     
     public static final Object ORDERCANCELMONITORLOCK = new Object();
     public static final Object ORDERCANCELMONITORLOCKFORWRAPPER = new Object();
-    public static final Object NEWORDERMONITORLOCK = new Object();
-    public static final Object OPENORDERLOCK = new Object();
+    public static final Object ORDERMONITORLOCK = new Object();
+    public static final Object OPENORDERENDLOCK = new Object();
+    public static final Object FIRSTOPENORDERRECOREXECDLOCK = new Object();
     
     private IBClient m_client = null; 
     
@@ -51,13 +52,11 @@ public class Trader {
         }
         
         orderManager.requestOpenOrder();
-        if(!orderManager.verifyAndInitializeOrders()){
-            LOG.debug("Abnormal order detected. Please correct order manually. Stoping program.");
-            System.exit(0);
-        }
         
         new Thread(m_client.getPositionMonitor(), "position monitor").start();
         
-        //new Thread(m_client.getCancelHandler(), "cancel monitor").start();
+        new Thread(m_client.getOrderHandler(), "order monitor").start();
+        
+        orderManager.triggerOrderMonitor();
     }
 }

@@ -24,7 +24,7 @@ public class CancelHandler implements Runnable{
     
     private static IBClient m_client = null;
     
-    private List pendingCancelList = null;
+    private List<Integer> pendingCancelList = null;
     
     public CancelHandler(IBClient client){
         m_client = client;
@@ -50,7 +50,6 @@ public class CancelHandler implements Runnable{
                 LOG.debug("Canceller notified about new order needs to be cancelled");
             }
             
-            List<Integer> pendingCancelList = (CopyOnWriteArrayList<Integer>) m_orderManager.getPendingCancelList();
             if(!pendingCancelList.isEmpty()){
                 for(Integer orderId : pendingCancelList){
                     m_client.getSocket().cancelOrder(orderId);
@@ -64,13 +63,15 @@ public class CancelHandler implements Runnable{
                             LOG.error(e.getMessage(), e);
                         }
                     }
-                    pendingCancelList.remove((Integer) orderId);
-                    LOG.debug("Order cancellation for orderId = " + orderId + " is confirmed. Removing from pending cancel list");
+                    LOG.debug("Order cancellation for orderId = " + orderId + " is confirmed. Removing from pending cancel list and order map");
                 }
-                synchronized(Trader.NEWORDERMONITORLOCK){
-                    Trader.NEWORDERMONITORLOCK.notifyAll();
-                    LOG.debug("Notify NewOrderHandler to check if new order needs to be placed");
+                
+                synchronized(Trader.ORDERMONITORLOCK){
+                    Trader.ORDERMONITORLOCK.notifyAll();
+                    LOG.debug("Notify OrderHandler to check if new order needs to be placed");
                 }
+            } else {
+                LOG.debug("PendingCancelList is empty");
             }
         }
     }
@@ -87,6 +88,24 @@ public class CancelHandler implements Runnable{
     }
     
     public void addOrderToPendingCancelList(int orderId){
-        pendingCancelList.add(orderId);
+        if(!pendingCancelList.contains((Integer) orderId)){
+            pendingCancelList.add((Integer) orderId);
+            LOG.debug("Added orderId = " + orderId + " to pendingCancelList, " + pendingCancelList.toString());
+        } else {
+            LOG.debug("Cannot add orderId = " + orderId + " to pendingCancelList because it's alread there. " + pendingCancelList.toString());
+        }
     }
+    
+    public void removeOrderFromPendingCancelList(int orderId){
+        if(pendingCancelList.contains((Integer) orderId)){
+            pendingCancelList.remove((Integer) orderId);
+            LOG.debug("Removed orderId = " + orderId + " from pendingCancelList, " + pendingCancelList.toString());
+        } else {
+            LOG.debug("Cannot remove orderId = " + orderId + " from pendingCancelList because it's not found. " + pendingCancelList.toString());
+        }
+    }
+    
+    public boolean pendingCancelListContains(int orderId){
+        return pendingCancelList.contains((Integer) orderId);
+    } 
 }

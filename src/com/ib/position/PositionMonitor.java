@@ -6,10 +6,12 @@
 package com.ib.position;
 
 import com.ib.api.IBClient;
+import com.ib.client.Types;
 import com.ib.config.ConfigReader;
 import com.ib.config.Configs;
 import com.ib.order.OrderManager;
 import org.apache.log4j.Logger;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  *
@@ -26,7 +28,7 @@ public class PositionMonitor implements Runnable{
     
     private double stopQuotingSize = Double.MAX_VALUE;
     
-    private boolean stopQuotingSizeReached = false;
+    private AtomicBoolean stopQuotingSizeReached = new AtomicBoolean(false);
     
     private IBClient m_client = null;
     
@@ -58,28 +60,36 @@ public class PositionMonitor implements Runnable{
             if(stopQuotingSize == Double.MAX_VALUE){
                 stopQuotingSize = Double.parseDouble(m_configReader.getConfig(Configs.STOP_QUOTING_SIZE));
             }
+            
+            fetchOrderManager();
+            
+            fetchPositionManager();
+            
             double currentPosition = m_positionManager.getPosition();
             
-            if(!stopQuotingSizeReached){
+            if(!stopQuotingSizeReached.get()){
                 LOG.debug("Position was within quoting size band");
                 if(Double.compare(Math.abs(currentPosition), stopQuotingSize) >= 0){
-                    LOG.debug("StopQuotingSize reached, cancelling order accordingly");
-                    stopQuotingSizeReached = true;
+                    stopQuotingSizeReached.set(true);
                     
                     // Cancel order accordingly
-                    while(m_orderManager == null){
-                        m_orderManager = m_client.getOrderManager();
-                        try{
-                            Thread.sleep(100);
-                        } catch (Exception e){
-                            LOG.debug(e.getMessage(), e);
-                        }
-                    }
                     
                     if(currentPosition > 0.0){
-                        m_orderManager.cancelCurrentBuyOrder();
+                        int orderId = m_orderManager.getCurrentOrderId(Types.Action.BUY);
+                        if(orderId < Integer.MAX_VALUE){
+                            LOG.debug("StopQuotingSize reached, cancelling buy order = " + orderId);
+                            m_orderManager.cancelCurrentOrder(orderId);
+                        } else {
+                            LOG.debug("StopQuotingSize reached, but no buy order is found");
+                        }
                     } else if(currentPosition < 0.0){
-                        m_orderManager.cancelCurrentSellOrder();
+                        int orderId = m_orderManager.getCurrentOrderId(Types.Action.SELL);
+                        if(orderId < Integer.MAX_VALUE){
+                            LOG.debug("StopQuotingSize reached, cancelling sell order = " + orderId);
+                            m_orderManager.cancelCurrentOrder(orderId);
+                        } else {
+                            LOG.debug("StopQuotingSize reached, but no sell order is found");
+                        }
                     }
                 } else {
                     // Do nothing
@@ -92,18 +102,9 @@ public class PositionMonitor implements Runnable{
                     LOG.debug("Position is still not within quoting size band, do nothing");
                 } else {
                     LOG.debug("StopQuotingSize is released, placing new order accordingly");
-                    stopQuotingSizeReached = false;
+                    stopQuotingSizeReached.set(false);
                     
-                    // Plcae new order
-                    if(m_orderManager == null){
-                        m_orderManager = m_client.getOrderManager();
-                    }
-                    
-                    if(currentPosition > 0.0){
-                        m_orderManager.placeNewBuyOrder();
-                    } else if(currentPosition < 0.0){
-                        m_orderManager.placeNewSellOrder();
-                    }
+                    m_orderManager.triggerOrderMonitor();
                 }
             }
             
@@ -116,6 +117,29 @@ public class PositionMonitor implements Runnable{
     }
     
     public boolean getStopQuotingSizeReached(){
-        return stopQuotingSizeReached;
+        return stopQuotingSizeReached.get();
+    }
+    
+    // Fetchers
+    private void fetchPositionManager(){
+        while(m_positionManager == null){
+            m_positionManager = m_client.getPositionManager();
+            try{
+                Thread.sleep(100);
+            } catch (Exception e){
+                LOG.error(e.getMessage(), e);
+            }
+        }
+    }
+    
+    private void fetchOrderManager(){
+        while(m_orderManager == null){
+            m_orderManager = m_client.getOrderManager();
+            try{
+                Thread.sleep(100);
+            } catch (Exception e){
+                LOG.error(e.getMessage(), e);
+            }
+        }
     }
 }

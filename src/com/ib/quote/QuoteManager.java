@@ -88,10 +88,9 @@ public class QuoteManager {
             if(m_orderManager == null){
                 m_orderManager = m_client.getOrderManager();
             }
-            if(m_orderManager.hasBuyOrder()){
-                LOG.debug("Active Buy order found. Updating current buy order");
-                m_orderManager.updateCurrentBuyOrder();
-            }
+            
+            LOG.debug("Triggering order monitor to update trade bid price");
+            m_orderManager.triggerOrderMonitor();
         }
     }
     
@@ -120,49 +119,52 @@ public class QuoteManager {
             if(m_orderManager == null){
                 m_orderManager = m_client.getOrderManager();
             }
-            if(m_orderManager.hasSellOrder()){
-                LOG.debug("Active SELL order found. Updating current sell order");
-                m_orderManager.updateCurrentSellOrder();
+            
+            LOG.debug("Triggering order monitor to update trade ask price");
+            m_orderManager.triggerOrderMonitor();
+        }
+    }
+    
+    private boolean calculateTradeBidPrice(){
+        synchronized(QUOTEACCESSLOCK){
+            if(staticOffset == Double.MAX_VALUE){
+                staticOffset = Double.parseDouble(m_configReader.getConfig(Configs.STATIC_OFFSET));
+            }
+            if(defaultSpread == Double.MAX_VALUE){
+                defaultSpread = Double.parseDouble(m_configReader.getConfig(Configs.DEFAULT_SPREAD));
+            }
+            
+            double dynamicOffset = m_client.getPositionManager().getDynamicOffset();
+            if(sourceBidPrice != -1 && dynamicOffset != Double.MAX_VALUE){
+                tradeBidPrice = Double.valueOf(df.format(sourceBidPrice + staticOffset + dynamicOffset - defaultSpread));
+                LOG.debug("Calculated trade bid price = " + sourceBidPrice + "(sourceBidPrice) + " +
+                        staticOffset + "(staticOffset) + " + dynamicOffset + "(dynamicOffset) - " + defaultSpread +
+                        "(defaultSpread) = " + tradeBidPrice);
+                return true;
+            } else {
+                LOG.debug("Failed to calculate trade bid price because either source bid price or dynamic offset is missing");
+                return false;
             }
         }
     }
     
-    public boolean calculateTradeBidPrice(){
-        if(staticOffset == Double.MAX_VALUE){
-            staticOffset = Double.parseDouble(m_configReader.getConfig(Configs.STATIC_OFFSET));
-        }
-        if(defaultSpread == Double.MAX_VALUE){
-            defaultSpread = Double.parseDouble(m_configReader.getConfig(Configs.DEFAULT_SPREAD));
-        }
-        
-        double dynamicOffset = m_client.getPositionManager().getDynamicOffset();
-        if(sourceBidPrice != -1 && dynamicOffset != Double.MAX_VALUE){
-            tradeBidPrice = Double.valueOf(df.format(sourceBidPrice + staticOffset + dynamicOffset - defaultSpread)); 
-            LOG.debug("Calculated trade bid price = " + sourceBidPrice + "(sourceBidPrice) + " + 
-                    staticOffset + "(staticOffset) + " + dynamicOffset + "(dynamicOffset) - " + defaultSpread + 
-                    "(defaultSpread) = " + tradeBidPrice);
-            return true;
-        } else {
-            LOG.debug("Failed to calculate trade bid price because either source bid price or dynamic offset is missing");
-            return false;
-        }
-    }
-    
-    public boolean calculateTradeAskPrice(){
-        if(staticOffset == Double.MAX_VALUE){
-            staticOffset = Double.parseDouble(m_configReader.getConfig(Configs.STATIC_OFFSET));
-        }
-        
-        double dynamicOffset = m_client.getPositionManager().getDynamicOffset();
-        if(sourceAskPrice != -1 && dynamicOffset != Double.MAX_VALUE){
-            tradeAskPrice = Double.valueOf(df.format(sourceAskPrice + staticOffset + dynamicOffset + defaultSpread)); 
-            LOG.debug("Calculated trade ask price = " + sourceAskPrice + "(sourceAskPrice) + " + 
-                    staticOffset + "(staticOffset) + " + dynamicOffset + "(dynamicOffset) + " + defaultSpread + 
-                    "(defaultSpread) = " + tradeAskPrice);
-            return true;
-        } else {
-            LOG.debug("Failed to calculate trade ask price because either source ask price or dynamic offset is missing");
-            return false;
+    private boolean calculateTradeAskPrice(){
+        synchronized(QUOTEACCESSLOCK){
+            if(staticOffset == Double.MAX_VALUE){
+                staticOffset = Double.parseDouble(m_configReader.getConfig(Configs.STATIC_OFFSET));
+            }
+            
+            double dynamicOffset = m_client.getPositionManager().getDynamicOffset();
+            if(sourceAskPrice != -1 && dynamicOffset != Double.MAX_VALUE){
+                tradeAskPrice = Double.valueOf(df.format(sourceAskPrice + staticOffset + dynamicOffset + defaultSpread));
+                LOG.debug("Calculated trade ask price = " + sourceAskPrice + "(sourceAskPrice) + " +
+                        staticOffset + "(staticOffset) + " + dynamicOffset + "(dynamicOffset) + " + defaultSpread +
+                        "(defaultSpread) = " + tradeAskPrice);
+                return true;
+            } else {
+                LOG.debug("Failed to calculate trade ask price because either source ask price or dynamic offset is missing");
+                return false;
+            }
         }
     }
     
