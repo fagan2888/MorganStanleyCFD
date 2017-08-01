@@ -189,7 +189,7 @@ public class IBClient implements EWrapper {
         //System.out.println("OrderStatus. Id: "+orderId+", Status: "+status+", Filled"+filled+", Remaining: "+remaining
         //+", AvgFillPrice: "+avgFillPrice+", PermId: "+permId+", ParentId: "+parentId+", LastFillPrice: "+lastFillPrice+
         //", ClientId: "+clientId+", WhyHeld: "+whyHeld+", MktCapPrice: "+mktCapPrice);
-        if(orderId >= 0){ // Only cares about API orders
+        if(orderId > 0){ // Only cares about API orders
             LOG.debug("OrderStatus. Id: "+orderId+", Status: "+status+", Filled: "+filled+", Remaining: "+remaining
                     +", AvgFillPrice: "+avgFillPrice+", PermId: "+permId+", ParentId: "+parentId+", LastFillPrice: "+lastFillPrice+
                     ", ClientId: "+clientId+", WhyHeld: "+whyHeld+", MktCapPrice: "+mktCapPrice);
@@ -222,7 +222,7 @@ public class IBClient implements EWrapper {
             OrderState orderState) {
         //System.out.println("OpenOrder. ID: "+orderId+", "+contract.symbol()+", "+contract.secType()+" @ "+contract.exchange()+": "+
         //	order.action()+", "+order.orderType()+" "+order.totalQuantity()+", "+orderState.status());
-        if(orderId >= 0){ // Only take cares of API orders
+        if(orderId > 0){ // Only take cares of API orders
             LOG.debug("OpenOrder. ID: "+orderId+", "+contract.symbol()+", "+contract.secType()+" @ "+contract.exchange()+": "+
                     order.action()+" "+order.totalQuantity()+", "+order.orderType()+"@"+order.lmtPrice()+", "+orderState.status());
             if(contract.conid() == tradeConid){
@@ -317,7 +317,7 @@ public class IBClient implements EWrapper {
     public void execDetails(int reqId, Contract contract, Execution execution) {
         //System.out.println("ExecDetails. "+reqId+" - ["+contract.symbol()+"], ["+contract.secType()+"], ["+contract.currency()+"], ["+execution.execId()+"], ["+execution.orderId()+"], ["+execution.shares()+"]");
         int orderId = execution.orderId();
-        if(orderId >= 0){
+        if(orderId > 0){
             LOG.debug("ExecDetails. "+reqId+" - ["+contract.symbol()+"], ["+contract.secType()+"], ["+contract.currency()+"], ["+execution.execId()+"], ["+execution.orderId()+"], ["+execution.shares()+"]");
             
             if(contract.conid() == tradeConid){
