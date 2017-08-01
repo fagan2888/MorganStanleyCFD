@@ -19,6 +19,7 @@ public class Configs {
     public static final String SOURCE_EXCHANGE = "SOURCE_EXCHANGE";
     public static final String TRADE_CONID = "TRADE_CONID";
     public static final String TRADE_EXCHANGE = "TRADE_EXCHANGE";
+    public static final String HEDGE_MULTIPLIER = "HEDGE_MULTIPLIER";
     public static final String DEFAULT_SPREAD = "DEFAULT_SPREAD";//
     public static final String STOP_QUOTING_SIZE = "STOP_QUOTING_SIZE";//
     public static final String POSITION_ADJUSTMENT = "POSITION_ADJUSTMENT";
@@ -26,6 +27,6 @@ public class Configs {
     public static String[] getAllConfigs(){
         return new String[]{ACCOUNT, ORDER_SIZE_DEFAULT, STATIC_OFFSET, PRICE_DISTORTION_RATE, 
         SIZE_DISTORTION_RATE, SOURCE_CONID, SOURCE_EXCHANGE, TRADE_CONID, TRADE_EXCHANGE, 
-        DEFAULT_SPREAD, STOP_QUOTING_SIZE, POSITION_ADJUSTMENT};
+        HEDGE_MULTIPLIER, DEFAULT_SPREAD, STOP_QUOTING_SIZE, POSITION_ADJUSTMENT};
     }
 }

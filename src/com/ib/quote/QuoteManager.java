@@ -9,7 +9,6 @@ import com.ib.api.IBClient;
 import org.apache.log4j.Logger;
 import com.ib.config.*;
 import com.ib.client.Contract;
-import java.text.DecimalFormat;
 import com.ib.position.*;
 import com.ib.order.OrderManager;
 
@@ -19,11 +18,11 @@ import com.ib.order.OrderManager;
  */
 public class QuoteManager {
     public static final int TICKERID = 1000;
-    private static ConfigReader m_configReader = null;
     
     private static final Logger LOG = Logger.getLogger(QuoteManager.class);
     
     private static OrderManager m_orderManager = null;
+    private static PositionManager m_positionManager = null;
     
     public static final Object QUOTELOCK = new Object();
     private static final Object QUOTEACCESSLOCK = new Object();
@@ -44,17 +43,21 @@ public class QuoteManager {
     private boolean firstSourceBidPriceReceived = false;
     private boolean firstSourceAskPriceReceived = false;
     
-    private DecimalFormat df = new DecimalFormat("#.##");
-    
     public QuoteManager(IBClient client){ 
         LOG.debug("Initializing Quote Manager");
         m_client = client;
-        if(m_configReader == null){
-            m_configReader = ConfigReader.getInstance();
-        }
+        
         if(m_orderManager == null){
             m_orderManager = m_client.getOrderManager();
         }
+        if(m_positionManager == null){
+            m_positionManager = m_client.getPositionManager();
+        }
+        
+        fetchStaticOffset();
+        fetchDefaultSpread();
+        fetchSourceConid();
+        fetchSourceExchange();
     }
     
     public void requestSourceData(){
@@ -75,19 +78,15 @@ public class QuoteManager {
                 }
                 if(sourceAskPrice != -1.0){
                     sourceMidpoint = (sourceBidPrice + sourceAskPrice)/2.0;
-                    sourceMidpoint = Double.valueOf(df.format(sourceMidpoint));
                 }
                 detectPriceChanged = true;
-                LOG.debug("Updated info: sourceBidPrice = " + sourceBidPrice + ", tradeBidPrice = " + tradeBidPrice +
-                        ", sourceMidpoint = " + sourceMidpoint);
+                LOG.debug("Updated info: sourceBidPrice = " + sourceBidPrice + ", sourceMidpoint = " + sourceMidpoint);
             }
         }
         
         if(detectPriceChanged && firstSourceBidPriceReceived){
             calculateTradeBidPrice();
-            if(m_orderManager == null){
-                m_orderManager = m_client.getOrderManager();
-            }
+            fetchOrderManager();
             
             LOG.debug("Triggering order monitor to update trade bid price");
             m_orderManager.triggerOrderMonitor();
@@ -106,40 +105,32 @@ public class QuoteManager {
                 }
                 if(sourceBidPrice != -1.0){
                     sourceMidpoint = (sourceBidPrice + sourceAskPrice)/2.0;
-                    sourceMidpoint = Double.valueOf(df.format(sourceMidpoint));
                 }
                 detectPriceChanged = true;
-                LOG.debug("Updated info: sourceAskPrice = " + sourceAskPrice + ", tradeAskPrice = " + tradeAskPrice +
-                        ", sourceMidpoint = " + sourceMidpoint);
+                LOG.debug("Updated info: sourceAskPrice = " + sourceAskPrice + ", sourceMidpoint = " + sourceMidpoint);
             }
         }
         
         if(detectPriceChanged && firstSourceAskPriceReceived){
             calculateTradeAskPrice();
-            if(m_orderManager == null){
-                m_orderManager = m_client.getOrderManager();
-            }
+            fetchOrderManager();
             
             LOG.debug("Triggering order monitor to update trade ask price");
             m_orderManager.triggerOrderMonitor();
         }
     }
     
-    private boolean calculateTradeBidPrice(){
+    public boolean calculateTradeBidPrice(){
         synchronized(QUOTEACCESSLOCK){
-            if(staticOffset == Double.MAX_VALUE){
-                staticOffset = Double.parseDouble(m_configReader.getConfig(Configs.STATIC_OFFSET));
-            }
-            if(defaultSpread == Double.MAX_VALUE){
-                defaultSpread = Double.parseDouble(m_configReader.getConfig(Configs.DEFAULT_SPREAD));
-            }
+            fetchStaticOffset();
+            fetchDefaultSpread();
             
             double dynamicOffset = m_client.getPositionManager().getDynamicOffset();
             if(sourceBidPrice != -1 && dynamicOffset != Double.MAX_VALUE){
-                tradeBidPrice = Double.valueOf(df.format(sourceBidPrice + staticOffset + dynamicOffset - defaultSpread));
+                tradeBidPrice = Math.floor(sourceBidPrice + staticOffset + dynamicOffset - defaultSpread);
                 LOG.debug("Calculated trade bid price = " + sourceBidPrice + "(sourceBidPrice) + " +
                         staticOffset + "(staticOffset) + " + dynamicOffset + "(dynamicOffset) - " + defaultSpread +
-                        "(defaultSpread) = " + tradeBidPrice);
+                        "(defaultSpread) = " + tradeBidPrice + " (rounded down)");
                 return true;
             } else {
                 LOG.debug("Failed to calculate trade bid price because either source bid price or dynamic offset is missing");
@@ -148,18 +139,18 @@ public class QuoteManager {
         }
     }
     
-    private boolean calculateTradeAskPrice(){
+    public boolean calculateTradeAskPrice(){
         synchronized(QUOTEACCESSLOCK){
-            if(staticOffset == Double.MAX_VALUE){
-                staticOffset = Double.parseDouble(m_configReader.getConfig(Configs.STATIC_OFFSET));
-            }
+            fetchStaticOffset();
+            fetchDefaultSpread();
+            fetchPositionManager();
             
-            double dynamicOffset = m_client.getPositionManager().getDynamicOffset();
+            double dynamicOffset = m_positionManager.getDynamicOffset();
             if(sourceAskPrice != -1 && dynamicOffset != Double.MAX_VALUE){
-                tradeAskPrice = Double.valueOf(df.format(sourceAskPrice + staticOffset + dynamicOffset + defaultSpread));
+                tradeAskPrice = Math.ceil(sourceAskPrice + staticOffset + dynamicOffset + defaultSpread);
                 LOG.debug("Calculated trade ask price = " + sourceAskPrice + "(sourceAskPrice) + " +
                         staticOffset + "(staticOffset) + " + dynamicOffset + "(dynamicOffset) + " + defaultSpread +
-                        "(defaultSpread) = " + tradeAskPrice);
+                        "(defaultSpread) = " + tradeAskPrice + " (rounded up)");
                 return true;
             } else {
                 LOG.debug("Failed to calculate trade ask price because either source ask price or dynamic offset is missing");
@@ -181,12 +172,9 @@ public class QuoteManager {
     }
     
     private Contract getSourceContract(){
-        if(sourceConid == Integer.MAX_VALUE){
-            sourceConid = Integer.parseInt(m_configReader.getConfig(Configs.SOURCE_CONID));
-        }
-        if(sourceExchange == null){
-            sourceExchange = m_configReader.getConfig(Configs.SOURCE_EXCHANGE);
-        }
+        fetchSourceConid();
+        fetchSourceExchange();
+        
         Contract sourceContract = new Contract();
         sourceContract.conid(sourceConid);
         sourceContract.exchange(sourceExchange);
@@ -211,5 +199,52 @@ public class QuoteManager {
         
         LOG.debug("Confirm all tick types are received.");
         return true;
+    }
+    
+    // Fetchers
+    private void fetchOrderManager(){
+        while(m_orderManager == null){
+            m_orderManager = m_client.getOrderManager();
+            try{
+                Thread.sleep(100);
+            } catch (Exception e){
+                LOG.error(e.getMessage(), e);
+            }
+        }
+    }
+    
+    private void fetchPositionManager(){
+        while(m_positionManager == null){
+            m_positionManager = m_client.getPositionManager();
+            try{
+                Thread.sleep(100);
+            } catch (Exception e){
+                LOG.error(e.getMessage(), e);
+            }
+        }
+    }
+    
+    private void fetchStaticOffset(){
+        if(staticOffset == Double.MAX_VALUE){
+            staticOffset = Double.parseDouble(ConfigReader.getInstance().getConfig(Configs.STATIC_OFFSET));
+        }
+    }
+    
+    private void fetchDefaultSpread(){
+        if(defaultSpread == Double.MAX_VALUE){
+            defaultSpread = Double.parseDouble(ConfigReader.getInstance().getConfig(Configs.DEFAULT_SPREAD));
+        }
+    }
+    
+    private void fetchSourceConid(){
+        if(sourceConid == Integer.MAX_VALUE){
+            sourceConid = Integer.parseInt(ConfigReader.getInstance().getConfig(Configs.SOURCE_CONID));
+        }
+    }
+    
+    private void fetchSourceExchange(){
+        if(sourceExchange == null){
+            sourceExchange = ConfigReader.getInstance().getConfig(Configs.SOURCE_EXCHANGE);
+        }
     }
 }

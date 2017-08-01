@@ -11,13 +11,16 @@ import java.util.Properties;
 import java.util.Enumeration;
 import java.util.HashMap;
 import org.apache.log4j.Logger;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 
 /**
  *
  * @author Siteng Jin
  */
 public class ConfigReader {
-    private static final String FILENAME = "config.properties";    
+    private static final String FILENAME = "resources/config.properties";    
     private static final Logger LOG = Logger.getLogger(ConfigReader.class);
     
     protected static ConfigReader _instance = null;
@@ -31,6 +34,35 @@ public class ConfigReader {
         readProperties();
     }
     
+    public void readProperties(){
+        try{
+            File file = new File(FILENAME);
+            FileInputStream fileInput = new FileInputStream(file);
+            m_prop = new Properties();
+            m_prop.load(fileInput);
+            fileInput.close();
+            
+            if(m_config == null){
+                m_config = new HashMap<String, String>();
+            }
+            
+            Enumeration enuKeys = m_prop.keys();
+            while(enuKeys.hasMoreElements()){
+                String key = (String) enuKeys.nextElement();
+                String value = m_prop.getProperty(key);
+                if(m_config.containsKey(key)){
+                    m_config.replace(key, value);
+                } else {
+                    m_config.put(key, value);
+                }
+            }
+            LOG.debug("Successfully loaded config: " + m_config.toString());
+        } catch (IOException ex){
+            LOG.error(ex.getMessage(), ex);
+        }
+    }
+    
+    /*
     public void readProperties(){
         try{
             input = this.getClass().getClassLoader().getResourceAsStream(FILENAME);
@@ -60,6 +92,7 @@ public class ConfigReader {
             LOG.error(ex.getMessage(), ex);
         }
     }
+*/
     
     public String getConfig(String key){
         // null is returned if no key is found

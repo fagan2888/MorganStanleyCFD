@@ -28,7 +28,9 @@ public class CancelHandler implements Runnable{
     
     public CancelHandler(IBClient client){
         m_client = client;
-        m_orderManager = m_client.getOrderManager();
+        if(m_orderManager == null){
+            m_orderManager = m_client.getOrderManager();
+        }
         pendingCancelList = new CopyOnWriteArrayList<Integer>();
     }
     
@@ -66,10 +68,8 @@ public class CancelHandler implements Runnable{
                     LOG.debug("Order cancellation for orderId = " + orderId + " is confirmed. Removing from pending cancel list and order map");
                 }
                 
-                synchronized(Trader.ORDERMONITORLOCK){
-                    Trader.ORDERMONITORLOCK.notifyAll();
-                    LOG.debug("Notify OrderHandler to check if new order needs to be placed");
-                }
+                fetchOrderManager();
+                m_orderManager.triggerOrderMonitor();
             } else {
                 LOG.debug("PendingCancelList is empty");
             }
@@ -108,4 +108,16 @@ public class CancelHandler implements Runnable{
     public boolean pendingCancelListContains(int orderId){
         return pendingCancelList.contains((Integer) orderId);
     } 
+    
+    // Fetchers
+    private void fetchOrderManager(){
+        while(m_orderManager == null){
+            m_orderManager = m_client.getOrderManager();
+            try{
+                Thread.sleep(100);
+            } catch (Exception e){
+                LOG.error(e.getMessage(), e);
+            }
+        }
+    }
 }

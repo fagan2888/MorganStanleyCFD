@@ -40,12 +40,8 @@ public class PositionMonitor implements Runnable{
         if(m_positionManager == null){
             m_positionManager = client.getPositionManager();
         }
-        if(m_configReader == null){
-            m_configReader = ConfigReader.getInstance();
-        }
-        if(stopQuotingSize == Double.MAX_VALUE){
-            stopQuotingSize = Double.parseDouble(m_configReader.getConfig(Configs.STOP_QUOTING_SIZE));
-        }
+        
+        fetchStopQuotingSize();
     }
     
     @Override
@@ -57,15 +53,13 @@ public class PositionMonitor implements Runnable{
     private void startMonitor(){
         while(true){
             LOG.debug("Checking current position...");
-            if(stopQuotingSize == Double.MAX_VALUE){
-                stopQuotingSize = Double.parseDouble(m_configReader.getConfig(Configs.STOP_QUOTING_SIZE));
-            }
+            fetchStopQuotingSize();
             
             fetchOrderManager();
             
             fetchPositionManager();
             
-            double currentPosition = m_positionManager.getPosition();
+            double currentPosition = m_positionManager.getHedgedTradePosition();
             
             if(!stopQuotingSizeReached.get()){
                 LOG.debug("Position was within quoting size band");
@@ -140,6 +134,13 @@ public class PositionMonitor implements Runnable{
             } catch (Exception e){
                 LOG.error(e.getMessage(), e);
             }
+        }
+    }
+    
+    // Fetchers
+    private void fetchStopQuotingSize(){
+        if(stopQuotingSize == Double.MAX_VALUE){
+            stopQuotingSize = Double.parseDouble(ConfigReader.getInstance().getConfig(Configs.STOP_QUOTING_SIZE));
         }
     }
 }

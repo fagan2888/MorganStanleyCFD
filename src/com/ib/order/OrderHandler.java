@@ -62,6 +62,9 @@ public class OrderHandler implements Runnable{
         if(m_quoteManager == null){
             m_quoteManager = m_client.getQuoteManager();
         }
+        if(m_cancelHandler == null){
+            m_cancelHandler = m_client.getCancelHandler();
+        }
     }
     
     @Override
@@ -179,6 +182,7 @@ public class OrderHandler implements Runnable{
         
         if(ordersAreInvalid){
             LOG.debug("Cancelling all current orders");
+            fetchOrderManager();
             if(!m_orderMap.isEmpty()){
                 Iterator it = m_orderMap.keySet().iterator();
                 while(it.hasNext()){
@@ -196,7 +200,7 @@ public class OrderHandler implements Runnable{
     private void placeNewBuyOrderIfNecessary(){
         // Buy order should be placed on the trade bid price
         
-        if(m_positionMonitor.getStopQuotingSizeReached() && Double.compare(m_positionManager.getPosition(), 0.0) > 0){
+        if(m_positionMonitor.getStopQuotingSizeReached() && Double.compare(m_positionManager.getHedgedTradePosition(), 0.0) > 0){
             LOG.debug("Placing buy order ignored: Position size limit reached");
             return;
         }
@@ -216,7 +220,7 @@ public class OrderHandler implements Runnable{
             
             int totalQuantity = Integer.MAX_VALUE;
             
-            double pos = m_positionManager.getPosition();
+            double pos = m_positionManager.getHedgedTradePosition();
             if(Double.compare(pos, 0.0) > 0){
                 totalQuantity = orderSizeDefault - positionAdjustment;
             } else {
@@ -253,7 +257,7 @@ public class OrderHandler implements Runnable{
     private void placeNewSellOrderIfNecessary(){
         // Sell order should be placed on the trade ask price
         
-        if(m_positionMonitor.getStopQuotingSizeReached() && Double.compare(m_positionManager.getPosition(), 0.0) < 0){
+        if(m_positionMonitor.getStopQuotingSizeReached() && Double.compare(m_positionManager.getHedgedTradePosition(), 0.0) < 0){
             LOG.debug("Placing sell order ignored: Position size limit reached");
             return;
         }
@@ -273,7 +277,7 @@ public class OrderHandler implements Runnable{
             
             int totalQuantity = Integer.MAX_VALUE;
             
-            double pos = m_positionManager.getPosition();
+            double pos = m_positionManager.getHedgedTradePosition();
             if(Double.compare(pos, 0.0) < 0){
                 totalQuantity = orderSizeDefault - positionAdjustment;
             } else {
@@ -317,7 +321,7 @@ public class OrderHandler implements Runnable{
             }
             
             // Only update price but not quantity, partial filled orders should be cancelled
-            
+            fetchCancelHandler();
             if(!m_cancelHandler.pendingCancelListContains(orderId)){
                 Order currentBuyOrder = m_orderMap.get((Integer) orderId).getOrder();
                 if(currentBuyOrder.lmtPrice() != tradeBidPrice){
@@ -347,7 +351,7 @@ public class OrderHandler implements Runnable{
             }
             
             // Only update price but not quantity, partial filled orders should be cancelled
-            
+            fetchCancelHandler();
             if(!m_cancelHandler.pendingCancelListContains(orderId)){
                 Order currentSellOrder = m_orderMap.get((Integer) orderId).getOrder();
                 if(currentSellOrder.lmtPrice() != tradeAskPrice){
@@ -398,18 +402,19 @@ public class OrderHandler implements Runnable{
     
     // Fetches
     private void fetchOrderMapFromOrderManager(){
+        fetchOrderManager();
+        
         m_orderMap = m_orderManager.getOrderMap();
     }
     
-    private void fetchTradeConid(){
-        if(tradeConid == Integer.MAX_VALUE){
-            tradeConid = Integer.parseInt(ConfigReader.getInstance().getConfig(Configs.TRADE_CONID));
-        }
-    }
-    
-    private void fetchTradeExchange(){
-        if(tradeExchange == null){
-            tradeExchange = ConfigReader.getInstance().getConfig(Configs.TRADE_EXCHANGE);
+    private void fetchOrderManager(){
+        while(m_orderManager == null){
+            m_orderManager = m_client.getOrderManager();
+            try{
+                Thread.sleep(100);
+            } catch (Exception e){
+                LOG.error(e.getMessage(), e);
+            }
         }
     }
     
@@ -454,6 +459,18 @@ public class OrderHandler implements Runnable{
             } catch (Exception e){
                 LOG.error(e.getMessage(), e);
             }
+        }
+    }
+    
+    private void fetchTradeConid(){
+        if(tradeConid == Integer.MAX_VALUE){
+            tradeConid = Integer.parseInt(ConfigReader.getInstance().getConfig(Configs.TRADE_CONID));
+        }
+    }
+    
+    private void fetchTradeExchange(){
+        if(tradeExchange == null){
+            tradeExchange = ConfigReader.getInstance().getConfig(Configs.TRADE_EXCHANGE);
         }
     }
     

@@ -1,8 +1,8 @@
 /*
- * To change this license header, choose License Headers in Project Properties.
- * To change this template file, choose Tools | Templates
- * and open the template in the editor.
- */
+* To change this license header, choose License Headers in Project Properties.
+* To change this template file, choose Tools | Templates
+* and open the template in the editor.
+*/
 package com.ib.order;
 
 import com.ib.api.IBClient;
@@ -26,7 +26,7 @@ public class Trader {
     public static final Object OPENORDERENDLOCK = new Object();
     public static final Object FIRSTOPENORDERRECOREXECDLOCK = new Object();
     
-    private IBClient m_client = null; 
+    private IBClient m_client = null;
     
     public Trader(IBClient client){
         m_client = client;
@@ -34,29 +34,35 @@ public class Trader {
     
     
     public void startTrade(){
-        // 1. Checking open orders
-        OrderManager orderManager = m_client.getOrderManager();
-        PositionManager positionManager = m_client.getPositionManager();
-        QuoteManager quoteManager = m_client.getQuoteManager();
-        
-        new Thread(m_client.getCancelHandler(), "cancel monitor").start();
-        
-        positionManager.requestPosition();   
-        if(!positionManager.confirmAllPositionReceived()){
-            // TODO
+        try{
+            // 1. Checking open orders
+            OrderManager orderManager = m_client.getOrderManager();
+            PositionManager positionManager = m_client.getPositionManager();
+            QuoteManager quoteManager = m_client.getQuoteManager();
+            
+            new Thread(m_client.getCancelHandler(), "cancel monitor").start();
+            
+            positionManager.requestPosition();
+            if(!positionManager.confirmAllPositionReceived()){
+                // TODO
+            }
+            
+            quoteManager.requestSourceData();
+            if(!quoteManager.confirmTickTypesReceived()){
+                // TODO
+            }
+            
+            orderManager.requestOpenOrder();
+            
+            new Thread(m_client.getPositionMonitor(), "position monitor").start();
+            
+            new Thread(m_client.getOrderHandler(), "order monitor").start();
+            
+            Thread.sleep(500);
+            
+            orderManager.triggerOrderMonitor();
+        } catch (Exception e){
+            LOG.debug(e.getMessage(), e);
         }
-        
-        quoteManager.requestSourceData();
-        if(!quoteManager.confirmTickTypesReceived()){
-            // TODO
-        }
-        
-        orderManager.requestOpenOrder();
-        
-        new Thread(m_client.getPositionMonitor(), "position monitor").start();
-        
-        new Thread(m_client.getOrderHandler(), "order monitor").start();
-        
-        orderManager.triggerOrderMonitor();
     }
 }

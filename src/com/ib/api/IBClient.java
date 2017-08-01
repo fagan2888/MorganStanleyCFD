@@ -16,11 +16,10 @@ import com.ib.position.*;
 import com.ib.order.*;
 //import java.util.ArrayList;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class IBClient implements EWrapper {
     private static final Logger LOG = Logger.getLogger(IBClient.class);
-    
-    public static final Object NEXTVALIDIDLOCK = new Object();
     
     protected static IBClient _instance = null;
     protected static QuoteManager m_quoteManager = null;
@@ -33,7 +32,10 @@ public class IBClient implements EWrapper {
     
     protected EReaderSignal readerSignal;
     protected EClientSocket _clientSocket = null;
-    protected int currentOrderId = -1;
+    protected AtomicInteger currentOrderId = new AtomicInteger(-1);
+    
+    protected int sourceConid = Integer.MAX_VALUE;
+    protected int tradeConid = Integer.MAX_VALUE;
     
     private List firstOpenOrderExecRecord = null;
     
@@ -53,6 +55,9 @@ public class IBClient implements EWrapper {
         m_cancelHandler = new CancelHandler(this);
         m_orderHandler = new OrderHandler(this);
         firstOpenOrderExecRecord = new CopyOnWriteArrayList<Integer>();
+        
+        fetchSourceConid();
+        fetchTradeConid();
     }
     //! [socket_init]
     public static IBClient getInstance() {
@@ -75,17 +80,12 @@ public class IBClient implements EWrapper {
     }
     
     public int getCurrentOrderId(){
-        synchronized(NEXTVALIDIDLOCK){
-            return currentOrderId;
-        }
+        return currentOrderId.get();
     }
     
     public int getCurrentOrderIdAndIncrement() {
-        synchronized(NEXTVALIDIDLOCK){
-            int orderId = currentOrderId;
-            currentOrderId++;
-            return orderId;
-        }
+        int orderId = currentOrderId.getAndIncrement();
+        return orderId;
     }
     
     public PositionManager getPositionManager(){
@@ -189,29 +189,30 @@ public class IBClient implements EWrapper {
         //System.out.println("OrderStatus. Id: "+orderId+", Status: "+status+", Filled"+filled+", Remaining: "+remaining
         //+", AvgFillPrice: "+avgFillPrice+", PermId: "+permId+", ParentId: "+parentId+", LastFillPrice: "+lastFillPrice+
         //", ClientId: "+clientId+", WhyHeld: "+whyHeld+", MktCapPrice: "+mktCapPrice);
-        LOG.debug("OrderStatus. Id: "+orderId+", Status: "+status+", Filled: "+filled+", Remaining: "+remaining
-                +", AvgFillPrice: "+avgFillPrice+", PermId: "+permId+", ParentId: "+parentId+", LastFillPrice: "+lastFillPrice+
-                ", ClientId: "+clientId+", WhyHeld: "+whyHeld+", MktCapPrice: "+mktCapPrice);
-        
-        if(status.equalsIgnoreCase("Cancelled")){
-            LOG.debug("Removing orderId = " + orderId + " from map and pending. Notifying cancel handler");
-            synchronized(Trader.ORDERCANCELMONITORLOCKFORWRAPPER){
+        if(orderId >= 0){ // Only cares about API orders
+            LOG.debug("OrderStatus. Id: "+orderId+", Status: "+status+", Filled: "+filled+", Remaining: "+remaining
+                    +", AvgFillPrice: "+avgFillPrice+", PermId: "+permId+", ParentId: "+parentId+", LastFillPrice: "+lastFillPrice+
+                    ", ClientId: "+clientId+", WhyHeld: "+whyHeld+", MktCapPrice: "+mktCapPrice);
+            
+            if(status.equalsIgnoreCase("Cancelled")){
+                LOG.debug("Removing orderId = " + orderId + " from map and pending. Notifying cancel handler");
+                synchronized(Trader.ORDERCANCELMONITORLOCKFORWRAPPER){
+                    m_cancelHandler.removeOrderFromPendingCancelList(orderId);
+                    m_orderManager.removeOrderFromMap(orderId);
+                    
+                    Trader.ORDERCANCELMONITORLOCKFORWRAPPER.notifyAll();
+                    LOG.debug("Received order cancel status, notifying Cancel Handler.");
+                }
+            } else if (status.equalsIgnoreCase("Filled")){
+                LOG.debug("Removing orderId = " + orderId + "from map and pending. Triggerring order monitor");
                 m_cancelHandler.removeOrderFromPendingCancelList(orderId);
                 m_orderManager.removeOrderFromMap(orderId);
                 
-                Trader.ORDERCANCELMONITORLOCKFORWRAPPER.notifyAll();
-                LOG.debug("Received order cancel status, notifying Cancel Handler.");
+                m_orderManager.triggerOrderMonitor();
+            } else {
+                m_orderManager.updateOrderStatus(orderId, filled, remaining);
             }
-        } else if (status.equalsIgnoreCase("Filled")){
-            LOG.debug("Removing orderId = " + orderId + "from map and pending. Triggerring order monitor");
-            m_cancelHandler.removeOrderFromPendingCancelList(orderId);
-            m_orderManager.removeOrderFromMap(orderId);
-            
-            m_orderManager.triggerOrderMonitor();
-        } else {
-            m_orderManager.updateOrderStatus(orderId, filled, remaining);
         }
-        
     }
     //! [orderstatus]
     
@@ -221,19 +222,20 @@ public class IBClient implements EWrapper {
             OrderState orderState) {
         //System.out.println("OpenOrder. ID: "+orderId+", "+contract.symbol()+", "+contract.secType()+" @ "+contract.exchange()+": "+
         //	order.action()+", "+order.orderType()+" "+order.totalQuantity()+", "+orderState.status());
-        
-        LOG.debug("OpenOrder. ID: "+orderId+", "+contract.symbol()+", "+contract.secType()+" @ "+contract.exchange()+": "+
-                order.action()+", "+order.orderType()+" "+order.totalQuantity()+", "+orderState.status());
-        if(contract.conid() == Integer.parseInt(ConfigReader.getInstance().getConfig(Configs.TRADE_CONID))){
-            // Only takes order info for the TRADE CONID
-            if(!firstOpenOrderExecRecord.contains((Integer) orderId)){
-                synchronized(Trader.FIRSTOPENORDERRECOREXECDLOCK){
-                    firstOpenOrderExecRecord.add((Integer) orderId);
-                    Trader.FIRSTOPENORDERRECOREXECDLOCK.notifyAll();
+        if(orderId >= 0){ // Only take cares of API orders
+            LOG.debug("OpenOrder. ID: "+orderId+", "+contract.symbol()+", "+contract.secType()+" @ "+contract.exchange()+": "+
+                    order.action()+" "+order.totalQuantity()+", "+order.orderType()+"@"+order.lmtPrice()+", "+orderState.status());
+            if(contract.conid() == tradeConid){
+                // Only takes order info for the TRADE CONID
+                if(!firstOpenOrderExecRecord.contains((Integer) orderId)){
+                    synchronized(Trader.FIRSTOPENORDERRECOREXECDLOCK){
+                        firstOpenOrderExecRecord.add((Integer) orderId);
+                        Trader.FIRSTOPENORDERRECOREXECDLOCK.notifyAll();
+                    }
+                    LOG.debug("First open order/exec is received for orderId = " + orderId + ", notifying Order Handler");
                 }
-                LOG.debug("First open order/exec is received for orderId = " + orderId + ", notifying Order Handler");
+                m_orderManager.updateOpenOrder(orderId, order);
             }
-            m_orderManager.updateOpenOrder(orderId, order);
         }
     }
     //! [openorder]
@@ -288,11 +290,8 @@ public class IBClient implements EWrapper {
     //! [nextvalidid]
     @Override
     public void nextValidId(int orderId) {
-        //System.out.println("Next Valid Id: ["+orderId+"]");
-        synchronized(NEXTVALIDIDLOCK){
-            currentOrderId = orderId;
-            LOG.debug("Next Valid Id: ["+orderId+"]");
-        }
+        currentOrderId.set(orderId);
+        LOG.debug("Next Valid Id: ["+orderId+"]");
     }
     //! [nextvalidid]
     
@@ -317,19 +316,21 @@ public class IBClient implements EWrapper {
     @Override
     public void execDetails(int reqId, Contract contract, Execution execution) {
         //System.out.println("ExecDetails. "+reqId+" - ["+contract.symbol()+"], ["+contract.secType()+"], ["+contract.currency()+"], ["+execution.execId()+"], ["+execution.orderId()+"], ["+execution.shares()+"]");
-        LOG.debug("ExecDetails. "+reqId+" - ["+contract.symbol()+"], ["+contract.secType()+"], ["+contract.currency()+"], ["+execution.execId()+"], ["+execution.orderId()+"], ["+execution.shares()+"]");
-        
         int orderId = execution.orderId();
-        if(contract.conid() == Integer.parseInt(ConfigReader.getInstance().getConfig(Configs.TRADE_CONID))){
-            // Only takes order info for the TRADE CONID
-            if(!firstOpenOrderExecRecord.contains((Integer) orderId)){
-                synchronized(Trader.FIRSTOPENORDERRECOREXECDLOCK){
-                    firstOpenOrderExecRecord.add((Integer) orderId);
-                    Trader.FIRSTOPENORDERRECOREXECDLOCK.notifyAll();
+        if(orderId >= 0){
+            LOG.debug("ExecDetails. "+reqId+" - ["+contract.symbol()+"], ["+contract.secType()+"], ["+contract.currency()+"], ["+execution.execId()+"], ["+execution.orderId()+"], ["+execution.shares()+"]");
+            
+            if(contract.conid() == tradeConid){
+                // Only takes order info for the TRADE CONID
+                if(!firstOpenOrderExecRecord.contains((Integer) orderId)){
+                    synchronized(Trader.FIRSTOPENORDERRECOREXECDLOCK){
+                        firstOpenOrderExecRecord.add((Integer) orderId);
+                        Trader.FIRSTOPENORDERRECOREXECDLOCK.notifyAll();
+                    }
+                    LOG.debug("First open order/exec is received for orderId = " + orderId + ", notifying Order Handler");
                 }
-                LOG.debug("First open order/exec is received for orderId = " + orderId + ", notifying Order Handler");
+                m_orderManager.processExecDetails(orderId, execution.cumQty());
             }
-            m_orderManager.processExecDetails(orderId, execution.cumQty());
         }
     }
     //! [execdetails]
@@ -337,7 +338,7 @@ public class IBClient implements EWrapper {
     //! [execdetailsend]
     @Override
     public void execDetailsEnd(int reqId) {
-        System.out.println("ExecDetailsEnd. "+reqId+"\n");
+        //System.out.println("ExecDetailsEnd. "+reqId+"\n");
     }
     //! [execdetailsend]
     
@@ -345,7 +346,7 @@ public class IBClient implements EWrapper {
     @Override
     public void updateMktDepth(int tickerId, int position, int operation,
             int side, double price, int size) {
-        System.out.println("UpdateMarketDepth. "+tickerId+" - Position: "+position+", Operation: "+operation+", Side: "+side+", Price: "+price+", Size: "+size+"");
+        //System.out.println("UpdateMarketDepth. "+tickerId+" - Position: "+position+", Operation: "+operation+", Side: "+side+", Price: "+price+", Size: "+size+"");
     }
     //! [updatemktdepth]
     
@@ -353,7 +354,7 @@ public class IBClient implements EWrapper {
     @Override
     public void updateMktDepthL2(int tickerId, int position,
             String marketMaker, int operation, int side, double price, int size) {
-        System.out.println("UpdateMarketDepthL2. "+tickerId+" - Position: "+position+", Operation: "+operation+", Side: "+side+", Price: "+price+", Size: "+size+"");
+        //System.out.println("UpdateMarketDepthL2. "+tickerId+" - Position: "+position+", Operation: "+operation+", Side: "+side+", Price: "+price+", Size: "+size+"");
     }
     //! [updatemktdepthl2]
     
@@ -361,7 +362,7 @@ public class IBClient implements EWrapper {
     @Override
     public void updateNewsBulletin(int msgId, int msgType, String message,
             String origExchange) {
-        System.out.println("News Bulletins. "+msgId+" - Type: "+msgType+", Message: "+message+", Exchange of Origin: "+origExchange+"\n");
+        //System.out.println("News Bulletins. "+msgId+" - Type: "+msgType+", Message: "+message+", Exchange of Origin: "+origExchange+"\n");
     }
     //! [updatenewsbulletin]
     
@@ -376,21 +377,21 @@ public class IBClient implements EWrapper {
     //! [receivefa]
     @Override
     public void receiveFA(int faDataType, String xml) {
-        System.out.println("Receiving FA: "+faDataType+" - "+xml);
+        //System.out.println("Receiving FA: "+faDataType+" - "+xml);
     }
     //! [receivefa]
     
     //! [historicaldata]
     @Override
     public void historicalData(int reqId, Bar bar) {
-        System.out.println("HistoricalData. "+reqId+" - Date: "+bar.time()+", Open: "+bar.open()+", High: "+bar.high()+", Low: "+bar.low()+", Close: "+bar.close()+", Volume: "+bar.volume()+", Count: "+bar.count()+", WAP: "+bar.wap());
+        //System.out.println("HistoricalData. "+reqId+" - Date: "+bar.time()+", Open: "+bar.open()+", High: "+bar.high()+", Low: "+bar.low()+", Close: "+bar.close()+", Volume: "+bar.volume()+", Count: "+bar.count()+", WAP: "+bar.wap());
     }
     //! [historicaldata]
     
     //! [historicaldataend]
     @Override
     public void historicalDataEnd(int reqId, String startDateStr, String endDateStr) {
-        System.out.println("HistoricalDataEnd. "+reqId+" - Start Date: "+startDateStr+", End Date: "+endDateStr);
+        //System.out.println("HistoricalDataEnd. "+reqId+" - Start Date: "+startDateStr+", End Date: "+endDateStr);
     }
     //! [historicaldataend]
     
@@ -398,7 +399,7 @@ public class IBClient implements EWrapper {
     //! [scannerparameters]
     @Override
     public void scannerParameters(String xml) {
-        System.out.println("ScannerParameters. "+xml+"\n");
+        //System.out.println("ScannerParameters. "+xml+"\n");
     }
     //! [scannerparameters]
     
@@ -407,15 +408,15 @@ public class IBClient implements EWrapper {
     public void scannerData(int reqId, int rank,
             ContractDetails contractDetails, String distance, String benchmark,
             String projection, String legsStr) {
-        System.out.println("ScannerData. "+reqId+" - Rank: "+rank+", Symbol: "+contractDetails.contract().symbol()+", SecType: "+contractDetails.contract().secType()+", Currency: "+contractDetails.contract().currency()
-                +", Distance: "+distance+", Benchmark: "+benchmark+", Projection: "+projection+", Legs String: "+legsStr);
+        //System.out.println("ScannerData. "+reqId+" - Rank: "+rank+", Symbol: "+contractDetails.contract().symbol()+", SecType: "+contractDetails.contract().secType()+", Currency: "+contractDetails.contract().currency()
+        //        +", Distance: "+distance+", Benchmark: "+benchmark+", Projection: "+projection+", Legs String: "+legsStr);
     }
     //! [scannerdata]
     
     //! [scannerdataend]
     @Override
     public void scannerDataEnd(int reqId) {
-        System.out.println("ScannerDataEnd. "+reqId);
+        //System.out.println("ScannerDataEnd. "+reqId);
     }
     //! [scannerdataend]
     
@@ -423,41 +424,41 @@ public class IBClient implements EWrapper {
     @Override
     public void realtimeBar(int reqId, long time, double open, double high,
             double low, double close, long volume, double wap, int count) {
-        System.out.println("RealTimeBars. " + reqId + " - Time: " + time + ", Open: " + open + ", High: " + high + ", Low: " + low + ", Close: " + close + ", Volume: " + volume + ", Count: " + count + ", WAP: " + wap);
+        //System.out.println("RealTimeBars. " + reqId + " - Time: " + time + ", Open: " + open + ", High: " + high + ", Low: " + low + ", Close: " + close + ", Volume: " + volume + ", Count: " + count + ", WAP: " + wap);
     }
     //! [realtimebar]
     @Override
     public void currentTime(long time) {
-        System.out.println("currentTime");
+        //System.out.println("currentTime");
     }
     //! [fundamentaldata]
     @Override
     public void fundamentalData(int reqId, String data) {
-        System.out.println("FundamentalData. ReqId: ["+reqId+"] - Data: ["+data+"]");
+        //System.out.println("FundamentalData. ReqId: ["+reqId+"] - Data: ["+data+"]");
     }
     //! [fundamentaldata]
     @Override
     public void deltaNeutralValidation(int reqId, DeltaNeutralContract underComp) {
-        System.out.println("deltaNeutralValidation");
+        //System.out.println("deltaNeutralValidation");
     }
     //! [ticksnapshotend]
     @Override
     public void tickSnapshotEnd(int reqId) {
-        System.out.println("TickSnapshotEnd: "+reqId);
+        //System.out.println("TickSnapshotEnd: "+reqId);
     }
     //! [ticksnapshotend]
     
     //! [marketdatatype]
     @Override
     public void marketDataType(int reqId, int marketDataType) {
-        System.out.println("MarketDataType. ["+reqId+"], Type: ["+marketDataType+"]\n");
+        //System.out.println("MarketDataType. ["+reqId+"], Type: ["+marketDataType+"]\n");
     }
     //! [marketdatatype]
     
     //! [commissionreport]
     @Override
     public void commissionReport(CommissionReport commissionReport) {
-        System.out.println("CommissionReport. ["+commissionReport.m_execId+"] - ["+commissionReport.m_commission+"] ["+commissionReport.m_currency+"] RPNL ["+commissionReport.m_realizedPNL+"]");
+        //System.out.println("CommissionReport. ["+commissionReport.m_execId+"] - ["+commissionReport.m_commission+"] ["+commissionReport.m_currency+"] RPNL ["+commissionReport.m_realizedPNL+"]");
     }
     //! [commissionreport]
     
@@ -467,8 +468,9 @@ public class IBClient implements EWrapper {
             double avgCost) {
         //System.out.println("Position. "+account+" - Symbol: "+contract.symbol()+", SecType: "+contract.secType()+", Currency: "+contract.currency()+", Position: "+pos+", Avg cost: "+avgCost);
         LOG.debug("Position. "+account+" - Symbol: "+contract.symbol()+", SecType: "+contract.secType()+", Currency: "+contract.currency()+", Position: "+pos+", Avg cost: "+avgCost);
-        if(contract.conid() == Integer.parseInt(ConfigReader.getInstance().getConfig(Configs.TRADE_CONID))){
-            // Only takes order info for the TRADE CONID
+        if(contract.conid() == tradeConid || contract.conid() == sourceConid){
+            // Only takes position info of the tradeConid and the sourceConid
+            // sourceConid position is counted to monitor hedge position
             Position position = new Position(account, contract, pos, avgCost);
             m_positionManager.updatePosition(position);
         }
@@ -490,46 +492,46 @@ public class IBClient implements EWrapper {
     @Override
     public void accountSummary(int reqId, String account, String tag,
             String value, String currency) {
-        System.out.println("Acct Summary. ReqId: " + reqId + ", Acct: " + account + ", Tag: " + tag + ", Value: " + value + ", Currency: " + currency);
+        //System.out.println("Acct Summary. ReqId: " + reqId + ", Acct: " + account + ", Tag: " + tag + ", Value: " + value + ", Currency: " + currency);
     }
     //! [accountsummary]
     
     //! [accountsummaryend]
     @Override
     public void accountSummaryEnd(int reqId) {
-        System.out.println("AccountSummaryEnd. Req Id: "+reqId+"\n");
+        //System.out.println("AccountSummaryEnd. Req Id: "+reqId+"\n");
     }
     //! [accountsummaryend]
     @Override
     public void verifyMessageAPI(String apiData) {
-        System.out.println("verifyMessageAPI");
+        //System.out.println("verifyMessageAPI");
     }
     
     @Override
     public void verifyCompleted(boolean isSuccessful, String errorText) {
-        System.out.println("verifyCompleted");
+        //System.out.println("verifyCompleted");
     }
     
     @Override
     public void verifyAndAuthMessageAPI(String apiData, String xyzChallenge) {
-        System.out.println("verifyAndAuthMessageAPI");
+        //System.out.println("verifyAndAuthMessageAPI");
     }
     
     @Override
     public void verifyAndAuthCompleted(boolean isSuccessful, String errorText) {
-        System.out.println("verifyAndAuthCompleted");
+        //System.out.println("verifyAndAuthCompleted");
     }
     //! [displaygrouplist]
     @Override
     public void displayGroupList(int reqId, String groups) {
-        System.out.println("Display Group List. ReqId: "+reqId+", Groups: "+groups+"\n");
+        //System.out.println("Display Group List. ReqId: "+reqId+", Groups: "+groups+"\n");
     }
     //! [displaygrouplist]
     
     //! [displaygroupupdated]
     @Override
     public void displayGroupUpdated(int reqId, String contractInfo) {
-        System.out.println("Display Group Updated. ReqId: "+reqId+", Contract info: "+contractInfo+"\n");
+        //System.out.println("Display Group Updated. ReqId: "+reqId+", Contract info: "+contractInfo+"\n");
     }
     //! [displaygroupupdated]
     @Override
@@ -548,19 +550,21 @@ public class IBClient implements EWrapper {
         //System.out.println("Error. Id: " + id + ", Code: " + errorCode + ", Msg: " + errorMsg + "\n");
         LOG.error("Error. Id: " + id + ", Code: " + errorCode + ", Msg: " + errorMsg);
         
-        LOG.debug("Removing orderId = " + id + " from map and pending. Notifying cancel handler");
-        synchronized(Trader.ORDERCANCELMONITORLOCKFORWRAPPER){
-            m_cancelHandler.removeOrderFromPendingCancelList(id);
-            m_orderManager.removeOrderFromMap(id);
-            
-            Trader.ORDERCANCELMONITORLOCKFORWRAPPER.notifyAll();
-            LOG.debug("Received order cancel status, notifying Cancel Handler.");
+        if((errorCode == 201 || errorCode == 202 || errorCode == 10147 || errorCode == 10148)&& m_cancelHandler.pendingCancelListContains(id)){
+            LOG.debug("Removing orderId = " + id + " from map and pending. Notifying cancel handler");
+            synchronized(Trader.ORDERCANCELMONITORLOCKFORWRAPPER){
+                m_cancelHandler.removeOrderFromPendingCancelList(id);
+                m_orderManager.removeOrderFromMap(id);
+                
+                Trader.ORDERCANCELMONITORLOCKFORWRAPPER.notifyAll();
+                LOG.debug("Received order cancel status, notifying Cancel Handler.");
+            }
         }
     }
     //! [error]
     @Override
     public void connectionClosed() {
-        System.out.println("Connection closed");
+        LOG.debug("Connection lost");
     }
     
     //! [connectack]
@@ -577,14 +581,14 @@ public class IBClient implements EWrapper {
     @Override
     public void positionMulti(int reqId, String account, String modelCode,
             Contract contract, double pos, double avgCost) {
-        System.out.println("Position Multi. Request: " + reqId + ", Account: " + account + ", ModelCode: " + modelCode + ", Symbol: " + contract.symbol() + ", SecType: " + contract.secType() + ", Currency: " + contract.currency() + ", Position: " + pos + ", Avg cost: " + avgCost + "\n");
+        //System.out.println("Position Multi. Request: " + reqId + ", Account: " + account + ", ModelCode: " + modelCode + ", Symbol: " + contract.symbol() + ", SecType: " + contract.secType() + ", Currency: " + contract.currency() + ", Position: " + pos + ", Avg cost: " + avgCost + "\n");
     }
     //! [positionmulti]
     
     //! [positionmultiend]
     @Override
     public void positionMultiEnd(int reqId) {
-        System.out.println("Position Multi End. Request: " + reqId + "\n");
+        //System.out.println("Position Multi End. Request: " + reqId + "\n");
     }
     //! [positionmultiend]
     
@@ -592,14 +596,14 @@ public class IBClient implements EWrapper {
     @Override
     public void accountUpdateMulti(int reqId, String account, String modelCode,
             String key, String value, String currency) {
-        System.out.println("Account Update Multi. Request: " + reqId + ", Account: " + account + ", ModelCode: " + modelCode + ", Key: " + key + ", Value: " + value + ", Currency: " + currency + "\n");
+        //System.out.println("Account Update Multi. Request: " + reqId + ", Account: " + account + ", ModelCode: " + modelCode + ", Key: " + key + ", Value: " + value + ", Currency: " + currency + "\n");
     }
     //! [accountupdatemulti]
     
     //! [accountupdatemultiend]
     @Override
     public void accountUpdateMultiEnd(int reqId) {
-        System.out.println("Account Update Multi End. Request: " + reqId + "\n");
+        //System.out.println("Account Update Multi End. Request: " + reqId + "\n");
     }
     //! [accountupdatemultiend]
     
@@ -608,14 +612,14 @@ public class IBClient implements EWrapper {
     public void securityDefinitionOptionalParameter(int reqId, String exchange,
             int underlyingConId, String tradingClass, String multiplier,
             Set<String> expirations, Set<Double> strikes) {
-        System.out.println("Security Definition Optional Parameter. Request: "+reqId+", Trading Class: "+tradingClass+", Multiplier: "+multiplier+" \n");
+        //System.out.println("Security Definition Optional Parameter. Request: "+reqId+", Trading Class: "+tradingClass+", Multiplier: "+multiplier+" \n");
     }
     //! [securityDefinitionOptionParameter]
     
     //! [securityDefinitionOptionParameterEnd]
     @Override
     public void securityDefinitionOptionalParameterEnd(int reqId) {
-        System.out.println("Security Definition Optional Parameter End. Request: " + reqId);
+        //System.out.println("Security Definition Optional Parameter End. Request: " + reqId);
     }
     //! [securityDefinitionOptionParameterEnd]
     
@@ -623,10 +627,10 @@ public class IBClient implements EWrapper {
     @Override
     public void softDollarTiers(int reqId, SoftDollarTier[] tiers) {
         for (SoftDollarTier tier : tiers) {
-            System.out.print("tier: " + tier.toString() + ", ");
+            //System.out.print("tier: " + tier.toString() + ", ");
         }
         
-        System.out.println();
+        //System.out.println();
     }
     //! [softDollarTiers]
     
@@ -634,17 +638,17 @@ public class IBClient implements EWrapper {
     @Override
     public void familyCodes(FamilyCode[] familyCodes) {
         for (FamilyCode fc : familyCodes) {
-            System.out.print("Family Code. AccountID: " + fc.accountID() + ", FamilyCode: " + fc.familyCodeStr());
+            //System.out.print("Family Code. AccountID: " + fc.accountID() + ", FamilyCode: " + fc.familyCodeStr());
         }
         
-        System.out.println();
+        //System.out.println();
     }
     //! [familyCodes]
     
     //! [symbolSamples]
     @Override
     public void symbolSamples(int reqId, ContractDescription[] contractDescriptions) {
-        System.out.println("Contract Descriptions. Request: " + reqId + "\n");
+        //System.out.println("Contract Descriptions. Request: " + reqId + "\n");
         for (ContractDescription  cd : contractDescriptions) {
             Contract c = cd.contract();
             StringBuilder derivativeSecTypesSB = new StringBuilder();
@@ -652,12 +656,12 @@ public class IBClient implements EWrapper {
                 derivativeSecTypesSB.append(str);
                 derivativeSecTypesSB.append(",");
             }
-            System.out.print("Contract. ConId: " + c.conid() + ", Symbol: " + c.symbol() + ", SecType: " + c.secType() +
-                    ", PrimaryExch: " + c.primaryExch() + ", Currency: " + c.currency() +
-                    ", DerivativeSecTypes:[" + derivativeSecTypesSB.toString() + "]");
+            //System.out.print("Contract. ConId: " + c.conid() + ", Symbol: " + c.symbol() + ", SecType: " + c.secType() +
+            //        ", PrimaryExch: " + c.primaryExch() + ", Currency: " + c.currency() +
+            //        ", DerivativeSecTypes:[" + derivativeSecTypesSB.toString() + "]");
         }
         
-        System.out.println();
+        //System.out.println();
     }
     //! [symbolSamples]
     
@@ -665,12 +669,12 @@ public class IBClient implements EWrapper {
     @Override
     public void mktDepthExchanges(DepthMktDataDescription[] depthMktDataDescriptions) {
         for (DepthMktDataDescription depthMktDataDescription : depthMktDataDescriptions) {
-            System.out.println("Depth Mkt Data Description. Exchange: " + depthMktDataDescription.exchange() +
-                    ", ListingExch: " + depthMktDataDescription.listingExch() +
-                    ", SecType: " + depthMktDataDescription.secType() +
-                    ", ServiceDataType: " + depthMktDataDescription.serviceDataType() +
-                    ", AggGroup: " + depthMktDataDescription.aggGroup()
-            );
+            //System.out.println("Depth Mkt Data Description. Exchange: " + depthMktDataDescription.exchange() +
+            //        ", ListingExch: " + depthMktDataDescription.listingExch() +
+            //        ", SecType: " + depthMktDataDescription.secType() +
+            //        ", ServiceDataType: " + depthMktDataDescription.serviceDataType() +
+            //        ", AggGroup: " + depthMktDataDescription.aggGroup()
+            //);
         }
     }
     //! [mktDepthExchanges]
@@ -678,18 +682,18 @@ public class IBClient implements EWrapper {
     //! [tickNews]
     @Override
     public void tickNews(int tickerId, long timeStamp, String providerCode, String articleId, String headline, String extraData) {
-        System.out.println("Tick News. TickerId: " + tickerId + ", TimeStamp: " + timeStamp + ", ProviderCode: " + providerCode + ", ArticleId: " + articleId + ", Headline: " + headline + ", ExtraData: " + extraData + "\n");
+        //System.out.println("Tick News. TickerId: " + tickerId + ", TimeStamp: " + timeStamp + ", ProviderCode: " + providerCode + ", ArticleId: " + articleId + ", Headline: " + headline + ", ExtraData: " + extraData + "\n");
     }
     //! [tickNews]
     
     //! [smartcomponents]
     @Override
     public void smartComponents(int reqId, Map<Integer, Entry<String, Character>> theMap) {
-        System.out.println("smart components req id:" + reqId);
+        //System.out.println("smart components req id:" + reqId);
         
         for (Map.Entry<Integer, Entry<String, Character>> item : theMap.entrySet()) {
-            System.out.println("bit number: " + item.getKey() +
-                    ", exchange: " + item.getValue().getKey() + ", exchange letter: " + item.getValue().getValue());
+            //System.out.println("bit number: " + item.getKey() +
+            //        ", exchange: " + item.getValue().getKey() + ", exchange letter: " + item.getValue().getValue());
         }
     }
     //! [smartcomponents]
@@ -706,67 +710,67 @@ public class IBClient implements EWrapper {
     @Override
     public void newsProviders(NewsProvider[] newsProviders) {
         for (NewsProvider np : newsProviders) {
-            System.out.print("News Provider. ProviderCode: " + np.providerCode() + ", ProviderName: " + np.providerName() + "\n");
+            //System.out.print("News Provider. ProviderCode: " + np.providerCode() + ", ProviderName: " + np.providerName() + "\n");
         }
         
-        System.out.println();
+        //System.out.println();
     }
     //! [newsProviders]
     
     //! [newsArticle]
     @Override
     public void newsArticle(int requestId, int articleType, String articleText) {
-        System.out.println("News Article. Request Id: " + requestId + ", ArticleType: " + articleType +
-                ", ArticleText: " + articleText);
+        //System.out.println("News Article. Request Id: " + requestId + ", ArticleType: " + articleType +
+        //        ", ArticleText: " + articleText);
     }
     //! [newsArticle]
     
     //! [historicalNews]
     @Override
     public void historicalNews(int requestId, String time, String providerCode, String articleId, String headline) {
-        System.out.println("Historical News. RequestId: " + requestId + ", Time: " + time + ", ProviderCode: " + providerCode + ", ArticleId: " + articleId + ", Headline: " + headline + "\n");
+        //System.out.println("Historical News. RequestId: " + requestId + ", Time: " + time + ", ProviderCode: " + providerCode + ", ArticleId: " + articleId + ", Headline: " + headline + "\n");
     }
     //! [historicalNews]
     
     //! [historicalNewsEnd]
     @Override
     public void historicalNewsEnd(int requestId, boolean hasMore) {
-        System.out.println("Historical News End. RequestId: " + requestId + ", HasMore: " + hasMore + "\n");
+        //System.out.println("Historical News End. RequestId: " + requestId + ", HasMore: " + hasMore + "\n");
     }
     //! [historicalNewsEnd]
     
     //! [headTimestamp]
     @Override
     public void headTimestamp(int reqId, String headTimestamp) {
-        System.out.println("Head timestamp. Req Id: " + reqId + ", headTimestamp: " + headTimestamp);
+        //System.out.println("Head timestamp. Req Id: " + reqId + ", headTimestamp: " + headTimestamp);
     }
     //! [headTimestamp]
     
     //! [histogramData]
     @Override
     public void histogramData(int reqId, List<HistogramEntry> items) {
-        System.out.println(EWrapperMsgGenerator.histogramData(reqId, items));
+        //System.out.println(EWrapperMsgGenerator.histogramData(reqId, items));
     }
     //! [histogramData]
     
     //! [historicalDataUpdate]
     @Override
     public void historicalDataUpdate(int reqId, Bar bar) {
-        System.out.println("HistoricalDataUpdate. "+reqId+" - Date: "+bar.time()+", Open: "+bar.open()+", High: "+bar.high()+", Low: "+bar.low()+", Close: "+bar.close()+", Volume: "+bar.volume()+", Count: "+bar.count()+", WAP: "+bar.wap());
+        //System.out.println("HistoricalDataUpdate. "+reqId+" - Date: "+bar.time()+", Open: "+bar.open()+", High: "+bar.high()+", Low: "+bar.low()+", Close: "+bar.close()+", Volume: "+bar.volume()+", Count: "+bar.count()+", WAP: "+bar.wap());
     }
     //! [historicalDataUpdate]
     
     //! [rerouteMktDataReq]
     @Override
     public void rerouteMktDataReq(int reqId, int conId, String exchange) {
-        System.out.println(EWrapperMsgGenerator.rerouteMktDataReq(reqId, conId, exchange));
+        //System.out.println(EWrapperMsgGenerator.rerouteMktDataReq(reqId, conId, exchange));
     }
     //! [rerouteMktDataReq]
     
     //! [rerouteMktDepthReq]
     @Override
     public void rerouteMktDepthReq(int reqId, int conId, String exchange) {
-        System.out.println(EWrapperMsgGenerator.rerouteMktDepthReq(reqId, conId, exchange));
+        //System.out.println(EWrapperMsgGenerator.rerouteMktDepthReq(reqId, conId, exchange));
     }
     //! [rerouteMktDepthReq]
     
@@ -775,9 +779,9 @@ public class IBClient implements EWrapper {
     public void marketRule(int marketRuleId, PriceIncrement[] priceIncrements) {
         DecimalFormat df = new DecimalFormat("#.#");
         df.setMaximumFractionDigits(340);
-        System.out.println("Market Rule Id: " + marketRuleId);
+        //System.out.println("Market Rule Id: " + marketRuleId);
         for (PriceIncrement pi : priceIncrements) {
-            System.out.println("Price Increment. Low Edge: " + df.format(pi.lowEdge()) + ", Increment: " + df.format(pi.increment()));
+            //System.out.println("Price Increment. Low Edge: " + df.format(pi.lowEdge()) + ", Increment: " + df.format(pi.increment()));
         }
     }
     //! [marketRule]
@@ -785,14 +789,14 @@ public class IBClient implements EWrapper {
     //! [pnl]
     @Override
     public void pnl(int reqId, double dailyPnL, double unrealizedPnL) {
-        System.out.println(EWrapperMsgGenerator.pnl(reqId, dailyPnL, unrealizedPnL));
+        //System.out.println(EWrapperMsgGenerator.pnl(reqId, dailyPnL, unrealizedPnL));
     }
     //! [pnl]
     
     //! [pnlsingle]
     @Override
     public void pnlSingle(int reqId, int pos, double dailyPnL, double unrealizedPnL, double value) {
-        System.out.println(EWrapperMsgGenerator.pnlSingle(reqId, pos, dailyPnL, unrealizedPnL, value));
+        //System.out.println(EWrapperMsgGenerator.pnlSingle(reqId, pos, dailyPnL, unrealizedPnL, value));
     }
     //! [pnlsingle]
     
@@ -800,7 +804,7 @@ public class IBClient implements EWrapper {
     @Override
     public void historicalTicks(int reqId, List<HistoricalTick> ticks, boolean done) {
         for (HistoricalTick tick : ticks) {
-            System.out.println(EWrapperMsgGenerator.historicalTick(reqId, tick.time(), tick.price(), tick.size()));
+            //System.out.println(EWrapperMsgGenerator.historicalTick(reqId, tick.time(), tick.price(), tick.size()));
         }
     }
     //! [historicalticks]
@@ -809,8 +813,8 @@ public class IBClient implements EWrapper {
     @Override
     public void historicalTicksBidAsk(int reqId, List<HistoricalTickBidAsk> ticks, boolean done) {
         for (HistoricalTickBidAsk tick : ticks) {
-            System.out.println(EWrapperMsgGenerator.historicalTickBidAsk(reqId, tick.time(), tick.mask(), tick.priceBid(), tick.priceAsk(), tick.sizeBid(),
-                    tick.sizeAsk()));
+            //System.out.println(EWrapperMsgGenerator.historicalTickBidAsk(reqId, tick.time(), tick.mask(), tick.priceBid(), tick.priceAsk(), tick.sizeBid(),
+            //        tick.sizeAsk()));
         }
     }
     //! [historicalticksbidask]
@@ -819,9 +823,21 @@ public class IBClient implements EWrapper {
     //! [historicaltickslast]
     public void historicalTicksLast(int reqId, List<HistoricalTickLast> ticks, boolean done) {
         for (HistoricalTickLast tick : ticks) {
-            System.out.println(EWrapperMsgGenerator.historicalTickLast(reqId, tick.time(), tick.mask(), tick.price(), tick.size(), tick.exchange(),
-                    tick.specialConditions()));
+            //System.out.println(EWrapperMsgGenerator.historicalTickLast(reqId, tick.time(), tick.mask(), tick.price(), tick.size(), tick.exchange(),
+            //        tick.specialConditions()));
         }
     }
     //! [historicaltickslast]
+    
+    private void fetchSourceConid(){
+        if(sourceConid == Integer.MAX_VALUE){
+            sourceConid = Integer.parseInt(ConfigReader.getInstance().getConfig(Configs.SOURCE_CONID));
+        }
+    }
+    
+    private void fetchTradeConid(){
+        if(tradeConid == Integer.MAX_VALUE){
+            tradeConid = Integer.parseInt(ConfigReader.getInstance().getConfig(Configs.TRADE_CONID));
+        }
+    }
 }

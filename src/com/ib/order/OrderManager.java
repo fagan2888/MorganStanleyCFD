@@ -21,7 +21,6 @@ import java.util.concurrent.ConcurrentHashMap;
 public class OrderManager{
     private static final Logger LOG = Logger.getLogger(OrderManager.class);
     
-    private static ConfigReader m_configReader = null;
     private static CancelHandler m_cancelHandler = null;
     
     public static final Object OPENORDERLOCK = new Object();
@@ -37,9 +36,6 @@ public class OrderManager{
         if(m_orderMap == null){
             m_orderMap = new ConcurrentHashMap<Integer, OrderInfo>();
         }
-        if(m_configReader == null){
-            m_configReader = ConfigReader.getInstance();
-        }
         if(m_cancelHandler == null){
             m_cancelHandler = m_client.getCancelHandler();
         }
@@ -48,6 +44,12 @@ public class OrderManager{
     public void requestOpenOrder(){
         m_client.getSocket().reqOpenOrders();
         LOG.debug("Sent reqOpenOrders()");
+    }
+    
+    public void requestAutoOpenOrder(){
+        // make sure "Use negative numbers to bind automatic orders" is checked in API settings
+        m_client.getSocket().reqAutoOpenOrders(true);
+        LOG.debug(("Sent reqAutoOpenOrders()"));
     }
     
     public void updateOpenOrder(int orderId , Order order){
@@ -102,6 +104,7 @@ public class OrderManager{
         
         if(detectedFullFill){
             LOG.debug("Full fill detected. Removing order from map and trigger Order Monitor");
+            fetchCancelHandler();
             if(m_orderMap.containsKey((Integer) orderId)){
                 m_cancelHandler.removeOrderFromPendingCancelList(orderId);
                 removeOrderFromMap((Integer) orderId);
@@ -118,6 +121,7 @@ public class OrderManager{
             
             if(Double.compare(cumQty, o.getOrder().totalQuantity()) >= 0){
                 LOG.debug("Full fill detected. Removing order from map and trigger Order Monitor");
+                fetchCancelHandler();
                 m_cancelHandler.removeOrderFromPendingCancelList(orderId);
                 removeOrderFromMap((Integer) orderId);
                 triggerOrderMonitor();
